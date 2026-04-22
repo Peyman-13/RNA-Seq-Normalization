@@ -6,7 +6,7 @@ This repository contains a comprehensive pipeline in R demonstrating modern norm
 
 ## View the Output
 You can view the fully rendered, interactive HTML pipeline here: 
-👉 **[RNA-Seq Normalization & Quality Control](https://peyman-13.github.io/RNA-Seq-Normalization/normalization.html)**
+👉 **[The knitted RMD](https://peyman-13.github.io/RNA-Seq-Normalization/normalization.html)**
 
 
 ## The Dataset
