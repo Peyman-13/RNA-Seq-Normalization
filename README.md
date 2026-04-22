@@ -4,6 +4,11 @@
 ## Overview
 This repository contains a comprehensive pipeline in R demonstrating modern normalization and quality control techniques for bulk RNA-Sequencing data. It serves as a practical guide to handling the mean-variance relationship inherent in transcriptomic data, transitioning away from legacy microarray methods to modern count-based standards.
 
+## View the Output
+You can view the fully rendered, interactive HTML pipeline here: 
+👉 **[RNA-Seq Normalization & Quality Control](https://peyman-13.github.io/RNA-Seq-Normalization/normalization.html)**
+
+
 ## The Dataset
 This pipeline uses the `airway` dataset from Bioconductor, which features bulk RNA-Seq read counts from airway smooth muscle cells treated with dexamethasone versus untreated controls.
 
@@ -26,4 +31,5 @@ To compile the R Markdown document locally, ensure you have R installed along wi
 if (!require("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
 BiocManager::install(c("airway", "edgeR", "DESeq2", "limma", "preprocessCore"))
+```
 
