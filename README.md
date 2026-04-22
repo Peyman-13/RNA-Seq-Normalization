@@ -26,3 +26,4 @@ To compile the R Markdown document locally, ensure you have R installed along wi
 if (!require("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
 BiocManager::install(c("airway", "edgeR", "DESeq2", "limma", "preprocessCore"))
+
