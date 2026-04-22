@@ -1,0 +1,432 @@
+---
+title: "Modern Normalization in Bioinformatics"
+author: "Peyman"
+date: "2019-03-22"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 10, fig.height = 6)
+```
+
+# Why Normalization?
+The first step in analyzing high-throughput biological data is preprocessing. Data normalization is a critical part of this phase. In modern transcriptomics (like RNA-Seq), raw read counts are not directly comparable across samples due to technical variations such as sequencing depth (library size) and RNA composition biases. Normalization mathematically scales the data so that technical artifacts are removed while true biological signals are preserved.
+
+In this document, we explore modern methods used in computational biology, replacing legacy microarray techniques with RNA-Seq standards.
+
+
+# Loading packages
+```{r}
+# Install packages if missing: BiocManager::install(c("airway", "edgeR", "DESeq2", "preprocessCore"))
+library(airway)
+library(edgeR)
+library(DESeq2)
+library(limma)
+library(pheatmap)
+library(preprocessCore)
+library(RColorBrewer)
+```
+
+# Loading Dataset
+We will use the `airway` dataset, a standard bulk RNA-Seq experiment available through Bioconductor. It contains read counts for genes across 8 samples (airway smooth muscle cells treated with dexamethasone vs. untreated).
+
+```{r}
+data(airway)
+# Extract the raw count matrix
+rawCounts <- assay(airway)
+colnames(rawCounts) <- colData(airway)$Run
+
+# Filter out genes with zero or very low counts across all samples
+keep <- rowSums(rawCounts > 0) >= 4
+rawCounts <- rawCounts[keep, ]
+
+cat("Dimensions of the filtered raw count matrix:", dim(rawCounts), "\n")
+```
+
+
+# Visualizing Raw Data
+Let's look at the distribution of the raw counts. Because RNA-Seq data has a massive dynamic range, we typically apply a Log2 transformation for visualization (adding a pseudo-count of 1 to avoid Log2(0)).
+
+```{r}
+logRaw <- log2(rawCounts + 1)
+colors <- brewer.pal(8, "Set2")
+
+par(mfrow = c(1, 2))
+
+# Boxplot
+boxplot(logRaw, outline = FALSE, col = colors, las = 2, 
+        main = "Boxplot of Log2(Raw Counts)", ylab = "Log2(Counts + 1)")
+
+# Density Plot
+plot(density(logRaw[,1]), col = colors[1], lwd = 2, main = "Density of Log2(Raw Counts)", 
+     xlab = "Log2(Counts + 1)", ylim = c(0, 0.25))
+for(i in 2:ncol(logRaw)){
+  lines(density(logRaw[,i]), col = colors[i], lwd = 2)
+}
+legend("topright", legend = colnames(logRaw), col = colors, lwd = 2, cex = 0.7)
+```
+
+
+# MA Plot of Raw Data
+An MA plot compares two samples by plotting the log-fold change (M) against the average log-expression (A). If the data is normalized, the bulk of the points should center around M = 0.
+
+
+```{r}
+par(mfrow = c(1, 1))
+A <- (logRaw[,1] + logRaw[,2]) / 2
+M <- logRaw[,1] - logRaw[,2]
+
+smoothScatter(A, M, main = "MA Plot: Sample 1 vs Sample 2 (Raw)", 
+              xlab = "Average Log-Expression (A)", ylab = "Log-Fold Change (M)")
+abline(h = 0, col = "red", lwd = 2)
+```
+
+The MA plot is a staple in transcriptomics. The x-axis (A) represents the average expression of a gene, while the y-axis (M) represents the log-fold change (the difference in expression) between two samples. 
+
+If the two samples were perfectly identical and had no technical biases, all points would lie flat on the red horizontal line ($M = 0$). In this *raw* data plot, you can see the data "fanning out" and pulling away from zero, particularly at higher expression levels. This skew indicates that one sample was sequenced much deeper than the other. If we do not normalize this, the algorithm will falsely assume these genes are biologically different, when it is just a technical sequencing artifact.
+
+
+# Normalization Methods
+## 1. Counts Per Million (CPM)
+The simplest normalization accounts for sequencing depth by calculating the Counts Per Million (CPM). It divides each read count by the total number of reads in that sample, then multiplies by 1,000,000.
+
+```{r}
+
+# Using edgeR to calculate log2 CPM
+logCPM <- cpm(rawCounts, log = TRUE, prior.count = 1)
+
+par(mfrow = c(1, 2))
+boxplot(logCPM, outline = FALSE, col = colors, las = 2, 
+        main = "Boxplot of Log2 CPM", ylab = "Log2 CPM")
+
+plot(density(logCPM[,1]), col = colors[1], lwd = 2, main = "Density of Log2 CPM", 
+     xlab = "Log2 CPM", ylim=c(0, 0.25))
+for(i in 2:ncol(logCPM)){
+  lines(density(logCPM[,i]), col = colors[i], lwd = 2)
+}
+
+```
+
+
+## 2. Transcripts Per Million (TPM)
+
+TPM is an essential upgrade to CPM. While CPM only accounts for the total number of reads (sequencing depth), TPM also accounts for gene length. Longer genes naturally produce more sequencing reads than shorter genes. If you want to compare the expression of Gene A to Gene B within the same sample, you must use TPM.
+
+(Note: In modern workflows, TPM is usually calculated by alignment-free tools like Kallisto or Salmon. Since our dataset is a raw count matrix, this chunk demonstrates the mathematical calculation using simulated gene lengths).
+
+
+TPM accounts for both sequencing depth and gene length. This is crucial when comparing the expression of two different genes within the exact same sample. 
+
+
+To calculate this accurately, we need the actual lengths of the genes. Because the `airway` dataset is a `SummarizedExperiment` object, it stores the genomic coordinates of all exons for each gene in its `rowRanges`. We can extract these to calculate the true length of each transcript.
+
+```{r}
+# 1. Extract actual gene lengths from the airway object
+# By summing the widths of the exons, we get the total transcript length per gene.
+actual_lengths <- sum(width(rowRanges(airway)))
+
+# IMPORTANT: We filtered 'rawCounts' earlier in step 2 to remove low-count genes. 
+# We must subset our lengths so they perfectly match the filtered count matrix!
+filtered_lengths <- actual_lengths[rownames(rawCounts)]
+
+# 2. Divide read counts by the length of each gene in kilobases (RPK)
+rpk <- rawCounts / (filtered_lengths / 1000)
+
+# 3. Count up all the RPK values in a sample and divide by 1,000,000 (scaling factor)
+scaling_factors <- colSums(rpk) / 1e6
+
+# 4. Divide the RPK values by the scaling factor to get TPM
+tpm_matrix <- t(t(rpk) / scaling_factors)
+logTPM <- log2(tpm_matrix + 1)
+
+par(mfrow = c(1, 2))
+boxplot(logTPM, outline = FALSE, col = colors, las = 2, 
+        main = "Boxplot of Log2 TPM", ylab = "Log2 TPM")
+
+plot(density(logTPM[,1]), col = colors[1], lwd = 2, main = "Density of Log2 TPM", 
+     xlab = "Log2 TPM", ylim=c(0, 0.25))
+for(i in 2:ncol(logTPM)){
+  lines(density(logTPM[,i]), col = colors[i], lwd = 2)
+}
+```
+
+
+## 3. Trimmed Mean of M-values (TMM)
+TMM is the default normalization method in the edgeR package. It estimates scale factors between samples by trimming the highest/lowest expressed genes and the genes with the largest fold changes, computing a weighted mean of the remaining M-values.
+
+```{r}
+
+y <- DGEList(counts = rawCounts)
+y <- calcNormFactors(y, method = "TMM")
+
+# Get TMM normalized log-CPM
+tmm_logCPM <- cpm(y, log = TRUE, prior.count = 1)
+
+par(mfrow = c(1, 2))
+boxplot(tmm_logCPM, outline = FALSE, col = colors, las = 2, 
+        main = "Boxplot of TMM Normalized", ylab = "TMM Log2 CPM")
+
+plot(density(tmm_logCPM[,1]), col = colors[1], lwd = 2, main = "Density of TMM Normalized", 
+     xlab = "TMM Log2 CPM", ylim=c(0, 0.25))
+for(i in 2:ncol(tmm_logCPM)){
+  lines(density(tmm_logCPM[,i]), col = colors[i], lwd = 2)
+}
+```
+
+## 4. Median of Ratios (DESeq2)
+The Median of Ratios method is used by DESeq2. It creates a "pseudo-reference" sample by calculating the geometric mean across all samples for each gene. It then calculates the ratio of each sample's gene count to the pseudo-reference, and takes the median of these ratios as the size factor for the sample.
+
+```{r}
+
+dds <- DESeqDataSetFromMatrix(countData = rawCounts, 
+                              colData = colData(airway), 
+                              design = ~ dex)
+dds <- estimateSizeFactors(dds)
+deseq2_norm <- counts(dds, normalized = TRUE)
+log_deseq2 <- log2(deseq2_norm + 1)
+
+par(mfrow = c(1, 2))
+# MA plot after DESeq2 normalization
+A_norm <- (log_deseq2[,1] + log_deseq2[,2]) / 2
+M_norm <- log_deseq2[,1] - log_deseq2[,2]
+
+smoothScatter(A_norm, M_norm, main = "MA Plot (DESeq2 Norm)", 
+              xlab = "Average Log-Expression (A)", ylab = "Log-Fold Change (M)")
+abline(h = 0, col = "red", lwd = 2)
+
+# QQ Plot comparing sample 1 and 2
+qqplot(log_deseq2[,1], log_deseq2[,2], col = "darkblue", pch = 16, cex = 0.5,
+       main = "QQ Plot (DESeq2 Norm)", xlab = "Sample 1", ylab = "Sample 2")
+abline(0, 1, col = "red", lwd = 2)
+```
+Look at how the DESeq2 normalization has pulled the "comet tail" of the data tightly around the red $M = 0$ line. Because the median of ratios method effectively scales the samples to account for sequencing depth, the systematic technical bias has been erased. The points that still sit far above or below the red line are now much more likely to be *true* biologically differentially expressed genes rather than technical noise.
+
+
+## 5. Variance Stabilizing Transformation (VST)
+
+Raw RNA-Seq counts suffer from a "mean-variance relationship"—meaning genes with high expression fluctuate wildly, while low-expressed genes barely move. If you run PCA or hierarchical clustering on raw or simply log-transformed data, the highly expressed genes will completely dominate the algorithm. VST squashes this variance so all genes contribute equally to machine learning tasks.
+
+
+Raw RNA-Seq data has a strong mean-variance relationship (highly expressed genes have very high variance). If you want to perform downstream machine learning tasks—such as Principal Component Analysis (PCA) or building heatmaps—you need a metric that stabilizes this variance. VST (built into `DESeq2`) is the standard choice.
+
+```{r}
+# We use the 'dds' object already created in the DESeq2 section
+vsd <- vst(dds, blind = FALSE)
+vst_matrix <- assay(vsd)
+
+par(mfrow = c(1, 2))
+boxplot(vst_matrix, outline = FALSE, col = colors, las = 2, 
+        main = "Boxplot of VST", ylab = "VST Expression")
+
+plot(density(vst_matrix[,1]), col = colors[1], lwd = 2, main = "Density of VST", 
+     xlab = "VST Expression", ylim=c(0, 0.25))
+for(i in 2:ncol(vst_matrix)){
+  lines(density(vst_matrix[,i]), col = colors[i], lwd = 2)
+}
+```
+
+
+## 5. The limma-voom Transformation
+`edgeR` and `DESeq2` are built strictly for count data. However, there is a massive ecosystem of statistical tools designed for normally distributed continuous data (like microarrays). `voom` bridges this gap. It transforms your count data into log2-CPM and assigns a "precision weight" to every single observation based on its mean-variance trend. This unlocks the ability to use the lightning-fast, highly flexible `limma` package for complex experimental designs.
+
+
+While `edgeR` and `DESeq2` use negative binomial models for count data, `limma-voom` takes a different approach. It transforms count data into log2-CPM and calculates a "precision weight" for every single observation. This accounts for the mean-variance relationship and allows you to apply powerful, traditional linear modeling to RNA-Seq data.
+
+
+```{r}
+# Create a design matrix based on our experimental conditions
+design <- model.matrix(~ dex, data = colData(airway))
+
+par(mfrow = c(1, 2))
+# We use the 'y' DGEList object created in the TMM section.
+# voom will automatically plot the mean-variance trend it models.
+v <- voom(y, design, plot = TRUE)
+
+# The transformed values are stored in the 'E' element
+voom_matrix <- v$E
+
+boxplot(voom_matrix, outline = FALSE, col = colors, las = 2, 
+        main = "Boxplot of voom logCPM", ylab = "voom log2-CPM")
+```
+
+RNA-seq count data is inherently noisy, specifically at the low end. Genes with very low read counts fluctuate wildly just by chance, while highly expressed genes are much more stable. 
+
+The `voom` plot visually captures this "mean-variance relationship." The x-axis shows the expression level (log2 count size), and the y-axis shows the variance (square root of standard deviation). Notice how the black trend line starts high on the left (low-expressed genes have high variance/noise) and drops down as expression increases. `voom` uses this exact curve to calculate a mathematical "weight" for every single data point. It tells the downstream statistical models: "Trust the high-count genes, and down-weight the noisy, low-count genes."
+
+
+
+## 6. Quantile Normalization
+Originally popular for microarrays, Quantile Normalization forces the statistical distributions of all samples to be identical. While sometimes aggressive for RNA-Seq, it remains an important tool.
+
+
+
+```{r}
+
+# Quantile normalize the log-transformed raw data
+quantiled <- normalize.quantiles(as.matrix(logRaw))
+colnames(quantiled) <- colnames(logRaw)
+
+par(mfrow = c(1, 2))
+boxplot(quantiled, outline = FALSE, col = colors, las = 2, 
+        main = "Boxplot of Quantile Norm", ylab = "Quantiled Log2 Counts")
+
+plot(density(quantiled[,1]), col = colors[1], lwd = 2, main = "Density of Quantile Norm", 
+     xlab = "Quantiled Log2 Counts", ylim=c(0, 0.25))
+for(i in 2:ncol(quantiled)){
+  lines(density(quantiled[,i]), col = colors[i], lwd = 2)
+}
+```
+
+# sugestion
+For modern bulk RNA-Seq analysis, TMM or Median of Ratios are the recommended best practices, as they account for sequencing depth and composition bias without forcing identical distributions on the data.
+
+# Quality Control
+## 1. PCA (Pre vs. Post Normalization)
+
+Principal Component Analysis (PCA) is the gold standard for RNA-Seq Quality Control. It reduces the thousands of dimensions (genes) down to a 2D plot, allowing us to see how similar the samples are. Ideally, samples from the same biological condition should cluster closely together.
+
+Because PCA is highly sensitive to variance, we should never run it on standard normalized counts (like CPM) due to the mean-variance relationship. Instead, we compare our Raw Log2 counts against our Variance Stabilized (VST) counts.
+
+```{r pca_qc}
+# Extract treatment groups
+treatment_groups <- colData(airway)$dex
+
+# Explicitly map colors to groups so the legend and plot never mismatch
+group_colors <- c("trt" = "firebrick", "untrt" = "dodgerblue")
+pca_colors <- group_colors[as.character(treatment_groups)]
+
+# Calculate PCA
+pca_raw <- prcomp(t(logRaw), scale. = TRUE)
+pca_vst <- prcomp(t(vst_matrix), scale. = TRUE)
+
+par(mfrow = c(1, 2))
+
+# Plot Raw PCA
+plot(pca_raw$x[,1], pca_raw$x[,2], col = pca_colors, pch = 16, cex = 1.5,
+     main = "PCA: Raw Log2 Counts", xlab = "PC1", ylab = "PC2")
+
+# Plot VST PCA
+plot(pca_vst$x[,1], pca_vst$x[,2], col = pca_colors, pch = 16, cex = 1.5,
+     main = "PCA: VST Normalized", xlab = "PC1", ylab = "PC2")
+
+# Add the legend securely in the corner
+legend("bottomright", legend = names(group_colors), 
+       col = group_colors, pch = 16, cex = 1)
+```
+The raw data already shows a massive, clear separation between the treated (red) and untreated (blue) samples. In computational biology, we love to see this because it means the biological effect of the treatment is incredibly strong. (Fun fact: Dexamethasone is a potent steroid that causes a massive transcriptomic shift in airway cells, which is exactly why this dataset is the "gold standard" for teaching RNA-Seq—it almost always yields great results).
+
+So, if the raw data is already clustered, why do we still normalize?
+
+The "Library Size" Illusion: In raw data, samples can cluster perfectly simply because one group was sequenced much deeper than the other (e.g., the sequencing machine generated 30 million reads for the treated group, but only 15 million for the untreated group). PCA will see that massive difference in total counts and separate them on the plot.
+
+Confirming True Biology: Normalization strips away those technical sequencing differences. When your samples still cluster perfectly in the VST plot, it acts as your scientific proof: the separation is driven by true biological gene expression, not a technical glitch.
+
+
+## 2. Sample-to-Sample Distances
+
+While PCA shows us the principal directions of variation, a sample distance heatmap provides a comprehensive overview of similarities and dissimilarities across all samples. We calculate the Euclidean distance between samples using the VST-normalized data, as the raw counts would be heavily biased by sequencing depth.
+
+```{r distance_heatmap}
+# Calculate Euclidean distance between samples
+# We transpose the matrix (t) because dist() expects samples as rows
+sampleDists <- dist(t(vst_matrix))
+
+# Convert the distance object into a standard matrix
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# Rename the rows and columns to include the treatment condition for clarity
+rownames(sampleDistMatrix) <- paste(colnames(vst_matrix), colData(airway)$dex, sep="-")
+colnames(sampleDistMatrix) <- NULL # Keep columns blank for a cleaner plot
+
+# Choose a color palette (blues are standard for distances)
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+# Generate the heatmap
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors,
+         main = "Sample-to-Sample Distances (VST)")
+```
+
+
+Looking at this specific heatmap, the experiment is a textbook success! 
+
+The dendrogram (tree) on the left clearly splits into two distinct, major branches: the top branch contains exclusively the `untrt` (untreated) samples, and the bottom branch contains exclusively the `trt` (treated) samples. 
+
+The dark blue diagonal line simply represents each sample compared to itself (distance = 0). The most important feature is the distinct blocks of lighter colors (higher distance) where the `trt` rows intersect with the `untrt` columns. This massive dissimilarity proves the dexamethasone treatment caused a huge shift in gene expression. Because there are no "rogue" samples (e.g., a `trt` sample hiding in the `untrt` cluster), we can confidently say there were no sample mix-ups in the lab and the data is pristine.
+
+## 3. Total Library Size
+
+Before performing any normalization, it is good practice to manually check the total sequencing depth (library size) of each sample. If one sample has drastically fewer reads than the rest, it might indicate a failed library preparation or sequencing issue.
+
+```{r library_size}
+# Calculate library sizes in millions of reads
+lib_sizes <- colSums(rawCounts) / 1e6
+
+# Match colors to our treatment groups for consistency
+# (Re-using the pca_colors from the previous chunk)
+barplot(lib_sizes, 
+        names.arg = colnames(rawCounts), 
+        col = pca_colors, 
+        las = 2, 
+        main = "Total Library Size per Sample",
+        ylab = "Millions of Reads")
+
+# Add a dashed line for the average library size
+abline(h = mean(lib_sizes), col = "black", lwd = 2, lty = 2)
+```
+Looking at this specific plot, the sequencing run was highly successful. All samples yielded between 15 million and 31 million reads. While there is natural variance in sequencing depth between the samples, all of them are well above standard quality thresholds. There are no failed "dud" samples, meaning we can proceed with the full dataset, relying on our normalization methods to smooth out these technical depth differences.
+
+
+## 4. DDESeq2 Dispersion Estimates
+This is a highly technical statistical plot that proves the `DESeq2` algorithm is actually working correctly on your specific dataset.
+
+
+Differential expression tools like `DESeq2` assume that genes with similar overall expression levels will have similar variance (dispersion). This plot visualizes how well `DESeq2` fit its statistical model to your data.
+
+```{r dispersion_plot}
+# calculate the dispersion estimates for the dds object
+dds <- estimateDispersions(dds)
+
+# Now generate the plot
+plotDispEsts(dds, main = "DESeq2 Dispersion Estimates")
+```
+**What are we looking at?**
+In RNA-Seq, variance (or "dispersion") is deeply tied to the expression level. Genes with very low read counts fluctuate wildly just by random chance, whereas highly expressed genes are much more stable. `DESeq2` assumes that genes with similar average expression should have similar dispersion. This plot visualizes how well that assumption holds up and how the algorithm adjusts the data. 
+* **X-axis (mean of normalized counts):** The average expression level of a gene across all samples. 
+* **Y-axis (dispersion):** The variance/noise for that gene.
+
+**Decoding the Legend:**
+* **Black dots (gene-est):** These are the raw, initial dispersion estimates calculated for every single gene individually. Notice how they are heavily scattered, especially on the left side (low expression).
+* **Red line (fitted):** This is the mathematical trend line `DESeq2` draws through the black dots. As expected, it starts high (low-count genes are noisy) and smoothly curves downward, flattening out as expression increases. 
+* **Blue dots (final):** To prevent low-expressed, highly variable genes from causing false positives, the algorithm "shrinks" the raw black dots toward the red trend line. The blue dots are the final, adjusted values used for differential expression testing.
+* **Blue circles (outliers):** You will see some blue dots with circles around them floating way above the red line. These are genes with genuinely massive biological variance. `DESeq2` flags them as outliers and refuses to shrink them, preserving their true biological noise.
+
+**Interpretation of this Plot:**
+This plot indicates a highly successful model fit for our data:
+1. **The Trend is Correct:** The red line perfectly captures the expected mean-variance relationship (curving down from left to right).
+2. **The Shrinkage is Working:** The blue cloud condenses tightly around the red line, meaning the algorithm successfully shared information across genes to stabilize the variance.
+3. **The "Zero" Band:** The thick black line of dots flatlining at the very bottom ($1e-08$) is entirely normal. These are genes with essentially zero variance across the samples (often genes that have zero counts in almost all samples). 
+
+Overall, this Quality Control check passes with flying colors. The data is well-behaved, the variance is properly stabilized, and the dataset is cleared for downstream differential expression testing.
+
+
+# Conclusion & Next Steps
+
+In this document, we successfully transitioned from raw, unnormalized RNA-Seq counts to a fully processed and quality-controlled dataset. We demonstrated why legacy methods fall short for modern sequencing data, and explored the mathematical mechanisms behind the current gold-standard techniques.
+
+**Key Takeaways:**
+* Raw RNA-Seq counts are heavily influenced by technical artifacts, specifically sequencing depth and RNA composition biases. 
+* Methods like **TMM** and **DESeq2 (Median of Ratios)** effectively neutralize these biases, allowing for accurate sample-to-sample comparisons.
+* Because RNA-Seq data possesses a strong mean-variance relationship, downstream machine learning (like PCA and clustering) requires Variance Stabilizing Transformations (**VST**) to prevent highly expressed genes from skewing the results.
+* Rigorous Quality Control confirms that our normalization was successful and that biological variance (the dexamethasone treatment) is the primary driver of the differences between our samples.
+
+**Next Steps:**
+With the data thoroughly normalized and passing all QC metrics, this dataset is now primed for downstream bioinformatics analysis:
+1. **Differential Expression Analysis:** Running the core statistical tests (via `DESeq2` or `limma`) to extract the exact list of genes significantly upregulated or downregulated by the treatment.
+2. **Pathway & Enrichment Analysis:** Using tools like Gene Ontology (GO) or GSEA to translate that list of individual genes into broader biological pathways and functions.
