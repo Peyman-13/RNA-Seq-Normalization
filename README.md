@@ -23,7 +23,7 @@ This document walks through the mathematical rationale, implementation, and visu
 * **Quality Control:** Principal Component Analysis (PCA), Sample-to-Sample Euclidean Distance Heatmaps, and Dispersion Estimates.
 
 ## How to Run
-To compile the R Markdown document locally, ensure you have R installed along with the following Bioconductor packages:
+To compile the R Markdown document (`Normalization.Rmd`) locally, ensure you have R installed along with the following Bioconductor packages:
 `airway`, `edgeR`, `DESeq2`, `limma`, `preprocessCore`, `RColorBrewer`, and `pheatmap`.
 
 ```R
