@@ -33,3 +33,6 @@ if (!require("BiocManager", quietly = TRUE))
 BiocManager::install(c("airway", "edgeR", "DESeq2", "limma", "preprocessCore"))
 ```
 
+### 🐍 Python Implementation
+
+For convenience and flexibility, a Jupyter Notebook (`Normalization.ipynb`) version of the workflow is included alongside the main R Markdown file, enabling the same analyses within a Python ecosystem.
