@@ -5,7 +5,7 @@
 This repository contains a comprehensive pipeline in R demonstrating modern normalization and quality control techniques for bulk RNA-Sequencing data. It serves as a practical guide to handling the mean-variance relationship inherent in transcriptomic data, transitioning away from legacy microarray methods to modern count-based standards.
 
 ## View the Output
-You can view the fully rendered, interactive HTML pipeline here: 
+You can view the fully rendered, interactive HTML (`normalization.html`) pipeline here: 
 👉 **[The knitted RMD](https://peyman-13.github.io/RNA-Seq-Normalization/normalization.html)**
 
 
